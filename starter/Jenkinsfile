@@ -1,0 +1,83 @@
+pipeline {
+    agent any
+
+    options { timestamps() }
+
+    environment {
+        GIT_URL          = 'https://github.com/Shakilkhan24/react-test-jenkins.git'
+        GIT_BRANCH       = 'main'
+        NETLIFY_SITE_ID  = credentials('netlify-site-id')
+        NETLIFY_AUTH_TOKEN = credentials('netlify-auth-token')
+    }
+
+    stages {
+        stage('checkout') {
+            steps {
+                checkout([$class: 'GitSCM',
+                          branches: [[name: env.GIT_BRANCH]],
+                          userRemoteConfigs: [[url: env.GIT_URL]]])
+
+                script {
+                    env.GIT_COMMIT_SHORT = sh(
+                        script: 'git rev-parse --short HEAD',
+                        returnStdout: true
+                    ).trim()
+                }
+            }
+        }
+
+        stage('install packages') {
+            steps {
+                sh '''
+                    if [ -f package-lock.json ]; then
+                        echo "using npm ci for better installation"
+                        npm ci --prefer-offline
+                    else
+                        echo "falling back to npm install"
+                        npm install --prefer-offline
+                    fi
+                '''
+            }
+        }
+
+        stage('lint-test') {
+            parallel {
+                stage('lint') {
+                    steps { sh 'npm run lint --silent' }
+                }
+                stage('test') {
+                    steps { sh 'npm test --silent -- --ci --runInBand' }
+                    post { always { junit 'test-results/**/*.xml' } }
+                }
+            }
+        }
+
+        stage('build') {
+            steps {
+                sh 'npm run build'
+                archiveArtifacts artifacts: 'build/**/*', fingerprint: true
+            }
+        }
+
+        stage('netlify') {
+            steps {
+                sh """
+                    npx netlify-cli deploy --dir=build \\
+                    --site=${NETLIFY_SITE_ID} \\
+                    --auth=${NETLIFY_AUTH_TOKEN} \\
+                    --prod
+                """
+            }
+            post {
+                success { echo 'Deployed to Netlify!' }
+                failure { echo 'Deployment Failed!' }
+            }
+        }
+    }
+
+    post {
+        always   { cleanWs() }
+        success  { echo '✅ Build & deploy finished!' }
+        failure  { echo '❌ Something went wrong.' }
+    }
+}
